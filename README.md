@@ -1,5 +1,7 @@
 # OpenFDA Drug Integration API
 
+![CI Tests](https://github.com/guirediss/fdaConsumer/actions/workflows/test.yml/badge.svg)
+
 ## Visão geral
 
 Aplicação backend desenvolvida para uma avaliação técnica. Ela extrai bulas de medicamentos da API pública OpenFDA, persiste os dados em PostgreSQL e disponibiliza operações de extração e consulta por uma API REST. A aplicação e o banco são executados em containers Docker coordenados pelo Docker Compose.
