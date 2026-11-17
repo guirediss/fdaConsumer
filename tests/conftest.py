@@ -12,17 +12,18 @@ from app.main import app
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    engine = create_engine(
-        "sqlite://",
+    test_engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
     test_session_local = sessionmaker(
         autocommit=False,
         autoflush=False,
-        bind=engine,
+        bind=test_engine,
     )
-    monkeypatch.setattr("app.main.engine", engine)
+    monkeypatch.setattr("app.main.engine", test_engine)
+    Base.metadata.create_all(bind=test_engine)
 
     def override_get_db() -> Generator[Session, None, None]:
         db = test_session_local()
@@ -36,5 +37,6 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
         with TestClient(app) as test_client:
             yield test_client
     finally:
-        app.dependency_overrides.pop(get_db, None)
-        engine.dispose()
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(bind=test_engine)
+        test_engine.dispose()

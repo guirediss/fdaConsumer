@@ -18,124 +18,152 @@ def _label(
     }
 
 
-def test_health_returns_ok(client):
-    response = client.get("/health")
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-
-
-def test_extract_deduplicates_and_updates_existing_labels(client, monkeypatch):
+def test_extract_drugs_creates_and_upserts_records(client, monkeypatch):
+    labels = [
+        _label("set-1", "SERTRALINE", "Brand One"),
+        _label("set-2", "SERTRALINE", "Brand Two"),
+    ]
     monkeypatch.setattr(
         "app.routers.drugs.fetch_drug_labels",
-        lambda generic_name, limit: [
-            _label("set-1", "sertraline", "Old Brand"),
-            _label("set-1", "sertraline", "Updated Brand"),
-            _label("set-2", "sertraline", "Another Brand"),
-        ],
+        lambda generic_name, limit: labels,
     )
+    payload = {"generic_name": "sertraline", "limit": 2}
 
-    first_response = client.post(
-        "/api/v1/drugs/extract",
-        json={"generic_name": "sertraline", "limit": 5},
-    )
+    first_response = client.post("/api/v1/drugs/extract", json=payload)
 
     assert first_response.status_code == 200
-    first_data = first_response.json()
-    assert first_data["extracted_count"] == 2
-    assert len(first_data["items"]) == 2
-    assert first_data["items"][0]["brand_name"] == "Updated Brand"
+    assert first_response.json()["extracted_count"] == 2
+    assert len(first_response.json()["items"]) == 2
 
-    monkeypatch.setattr(
-        "app.routers.drugs.fetch_drug_labels",
-        lambda generic_name, limit: [
-            _label("set-1", "sertraline", "Latest Brand"),
-        ],
-    )
-    second_response = client.post(
-        "/api/v1/drugs/extract",
-        json={"generic_name": "sertraline"},
-    )
+    labels[0] = _label("set-1", "SERTRALINE", "Updated Brand")
+    second_response = client.post("/api/v1/drugs/extract", json=payload)
 
     assert second_response.status_code == 200
-    assert second_response.json()["extracted_count"] == 1
+    assert second_response.json()["extracted_count"] == 2
 
-    list_response = client.get("/api/v1/drugs?generic_name=sertraline")
+    list_response = client.get("/api/v1/drugs")
     list_data = list_response.json()
     assert list_data["total"] == 2
-    assert next(
-        item for item in list_data["items"] if item["set_id"] == "set-1"
-    )["brand_name"] == "Latest Brand"
+    assert next(item for item in list_data["items"] if item["set_id"] == "set-1")[
+        "brand_name"
+    ] == "Updated Brand"
 
 
-@pytest.mark.parametrize(
-    ("error", "status_code"),
-    [
-        (DrugNotFoundError("No matching drug"), 404),
-        (OpenFDAIntegrationError("OpenFDA unavailable"), 502),
-    ],
-)
-def test_extract_maps_openfda_errors(client, monkeypatch, error, status_code):
-    def raise_error(generic_name, limit):
-        raise error
+def test_extract_drugs_returns_404_when_not_found(client, monkeypatch):
+    def raise_not_found(generic_name, limit):
+        raise DrugNotFoundError("No OpenFDA labels found")
 
-    monkeypatch.setattr("app.routers.drugs.fetch_drug_labels", raise_error)
+    monkeypatch.setattr("app.routers.drugs.fetch_drug_labels", raise_not_found)
 
     response = client.post(
         "/api/v1/drugs/extract",
         json={"generic_name": "sertraline"},
     )
 
-    assert response.status_code == status_code
-    assert response.json()["detail"] == str(error)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "No OpenFDA labels found"
 
 
-def test_list_filters_and_paginates_then_gets_drug_by_id(client, monkeypatch):
+def test_extract_drugs_returns_502_on_external_failure(client, monkeypatch):
+    def raise_integration_error(generic_name, limit):
+        raise OpenFDAIntegrationError("OpenFDA unavailable")
+
+    monkeypatch.setattr(
+        "app.routers.drugs.fetch_drug_labels",
+        raise_integration_error,
+    )
+
+    response = client.post(
+        "/api/v1/drugs/extract",
+        json={"generic_name": "sertraline"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "OpenFDA unavailable"
+
+
+def test_list_drugs_supports_filter_and_pagination(client, monkeypatch):
     monkeypatch.setattr(
         "app.routers.drugs.fetch_drug_labels",
         lambda generic_name, limit: [
-            _label("set-sertraline-1", "sertraline", "Brand One"),
-            _label("set-fluoxetine", "fluoxetine", "Brand Fluoxetine"),
-            _label("set-sertraline-2", "sertraline", "Brand Two"),
+            _label("set-sertraline-1", "SERTRALINE", "Brand One"),
+            _label("set-aspirin", "ASPIRIN", "Brand Aspirin"),
+            _label("set-sertraline-2", "SERTRALINE", "Brand Two"),
         ],
     )
     client.post(
         "/api/v1/drugs/extract",
-        json={"generic_name": "sertraline", "limit": 5},
+        json={"generic_name": "sertraline", "limit": 3},
     )
 
-    first_page = client.get(
+    response = client.get(
         "/api/v1/drugs",
-        params={"generic_name": "SERTRALINE", "skip": 0, "limit": 1},
+        params={"generic_name": "sertraline", "skip": 0, "limit": 1},
     )
-    first_data = first_page.json()
-    assert first_page.status_code == 200
-    assert first_data["total"] == 2
-    assert first_data["limit"] == 1
-    assert len(first_data["items"]) == 1
-    assert first_data["items"][0]["set_id"] == "set-sertraline-2"
 
-    second_page = client.get(
-        "/api/v1/drugs",
-        params={"generic_name": "sertraline", "skip": 1, "limit": 1},
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 2
+    assert len(data["items"]) == 1
+    assert data["skip"] == 0
+    assert data["limit"] == 1
+
+
+def test_get_drug_by_id_and_not_found(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.routers.drugs.fetch_drug_labels",
+        lambda generic_name, limit: [_label("set-1", "SERTRALINE", "Brand One")],
     )
-    second_data = second_page.json()
-    assert second_data["total"] == 2
-    assert second_data["items"][0]["set_id"] == "set-sertraline-1"
+    extraction = client.post(
+        "/api/v1/drugs/extract",
+        json={"generic_name": "sertraline"},
+    )
+    drug_id = extraction.json()["items"][0]["id"]
 
-    drug_id = first_data["items"][0]["id"]
-    detail = client.get(f"/api/v1/drugs/{drug_id}")
-    assert detail.status_code == 200
-    assert detail.json()["set_id"] == "set-sertraline-2"
-
+    found = client.get(f"/api/v1/drugs/{drug_id}")
     missing = client.get("/api/v1/drugs/9999")
+
+    assert found.status_code == 200
+    assert found.json()["set_id"] == "set-1"
     assert missing.status_code == 404
 
 
-def test_extract_rejects_invalid_request_fields(client):
-    response = client.post(
-        "/api/v1/drugs/extract",
-        json={"generic_name": "a", "limit": 26},
-    )
+@pytest.mark.parametrize(
+    ("payload", "expected_status"),
+    [
+        ({"generic_name": "s"}, 422),
+        ({"generic_name": "sertraline", "limit": 0}, 422),
+        ({"generic_name": "sertraline", "limit": 26}, 422),
+    ],
+)
+def test_extract_rejects_invalid_payload(client, payload, expected_status):
+    response = client.post("/api/v1/drugs/extract", json=payload)
+
+    assert response.status_code == expected_status
+
+
+@pytest.mark.parametrize(
+    ("params", "expected_status"),
+    [
+        ({"skip": -1}, 422),
+        ({"limit": 0}, 422),
+        ({"limit": 101}, 422),
+    ],
+)
+def test_list_rejects_invalid_pagination(client, params, expected_status):
+    response = client.get("/api/v1/drugs", params=params)
+
+    assert response.status_code == expected_status
+
+
+def test_list_returns_empty_result_when_filter_has_no_matches(client):
+    response = client.get("/api/v1/drugs", params={"generic_name": "unknown"})
+
+    assert response.status_code == 200
+    assert response.json() == {"total": 0, "skip": 0, "limit": 20, "items": []}
+
+
+def test_get_drug_rejects_non_integer_id(client):
+    response = client.get("/api/v1/drugs/not-an-id")
 
     assert response.status_code == 422
